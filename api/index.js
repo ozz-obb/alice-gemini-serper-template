@@ -242,6 +242,14 @@ function errorForUser(error) {
 }
 
 export default async function handler(req, res) {
+    console.log("ALICE_WEBHOOK_HIT", {
+    method: req.method,
+    url: req.url,
+    hasBody: Boolean(req.body),
+    bodyKeys: req.body && typeof req.body === "object"
+      ? Object.keys(req.body)
+      : []
+  });
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
