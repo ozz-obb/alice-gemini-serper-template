@@ -1,10 +1,10 @@
-const DEFAULT_MODEL = "gpt-4.1-mini";
+const DEFAULT_MODEL = "mistral-small-latest";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
 const TOTAL_RESPONSE_BUDGET_MS = 3600;
 const SERPER_TIMEOUT_MS = 600;
-const OPENAI_TIMEOUT_MS = 2500;
+const MISTRAL_TIMEOUT_MS = 2500;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -142,14 +142,14 @@ async function searchWeb(query, timeoutMs) {
   }
 }
 
-async function askOpenAI(text, history, searchContext, timeoutMs) {
-  const key = process.env.OPENAI_API_KEY;
+async function askMistral(text, history, searchContext, timeoutMs) {
+  const key = process.env.MISTRAL_API_KEY;
 
-  if (!key) throw new Error("MISSING_OPENAI_KEY");
+  if (!key) throw new Error("MISSING_MISTRAL_KEY");
   if (timeoutMs < 250) throw new Error("TIME_BUDGET_EXHAUSTED");
 
   const model = String(
-    process.env.OPENAI_MODEL || DEFAULT_MODEL
+    process.env.MISTRAL_MODEL || DEFAULT_MODEL
   ).trim();
 
   if (!/^[A-Za-z0-9._-]+$/.test(model)) {
@@ -180,7 +180,7 @@ async function askOpenAI(text, history, searchContext, timeoutMs) {
   });
 
   const { response, data } = await fetchJson(
-    "https://api.openai.com/v1/chat/completions",
+    "https://api.mistral.ai/v1/chat/completions",
     {
       method: "POST",
       headers: {
@@ -194,43 +194,53 @@ async function askOpenAI(text, history, searchContext, timeoutMs) {
         max_tokens: 240
       })
     },
-    Math.min(OPENAI_TIMEOUT_MS, timeoutMs)
+    Math.min(MISTRAL_TIMEOUT_MS, timeoutMs)
   );
 
   if (!response.ok) {
     const status = Number(response.status);
-    console.error("OpenAI request failed with HTTP", status);
+    console.error("Mistral request failed with HTTP", status);
 
     if (status === 401 || status === 403) {
-      throw new Error("OPENAI_KEY_REJECTED");
+      throw new Error("MISTRAL_KEY_REJECTED");
     }
 
     if (status === 429) {
-      throw new Error("OPENAI_QUOTA");
+      throw new Error("MISTRAL_LIMIT");
     }
 
-    throw new Error("OPENAI_REQUEST_FAILED");
+    throw new Error("MISTRAL_REQUEST_FAILED");
   }
 
-  const answer = data?.choices?.[0]?.message?.content?.trim();
+  const answer = data?.choices?.[0]?.message?.content;
 
-  if (!answer) {
-    throw new Error("OPENAI_EMPTY_RESPONSE");
+  const answerText = typeof answer === "string"
+    ? answer.trim()
+    : Array.isArray(answer)
+      ? answer
+          .filter(item => item && item.type === "text")
+          .map(item => item.text || "")
+          .join(" ")
+          .trim()
+      : "";
+
+  if (!answerText) {
+    throw new Error("MISTRAL_EMPTY_RESPONSE");
   }
 
-  return answer;
+  return answerText;
 }
 
 function errorForUser(error) {
   switch (error?.message) {
-    case "MISSING_OPENAI_KEY":
-      return "Сервер пока не настроен. Проверьте переменную OPENAI_API_KEY в настройках Vercel.";
+    case "MISSING_MISTRAL_KEY":
+      return "Сервер пока не настроен. Проверьте переменную MISTRAL_API_KEY в настройках Vercel.";
 
-    case "OPENAI_KEY_REJECTED":
-      return "Не удалось подключиться к OpenAI. Проверьте API-ключ в настройках Vercel.";
+    case "MISTRAL_KEY_REJECTED":
+      return "Не удалось подключиться к Mistral. Проверьте API-ключ в настройках Vercel.";
 
-    case "OPENAI_QUOTA":
-      return "Сейчас недоступен лимит запросов к OpenAI. Проверьте баланс API или попробуйте позже.";
+    case "MISTRAL_LIMIT":
+      return "У Mistral достигнут лимит запросов или квоты. Проверьте доступность API и лимиты аккаунта.";
 
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
@@ -242,7 +252,7 @@ function errorForUser(error) {
 }
 
 export default async function handler(req, res) {
-    console.log("ALICE_WEBHOOK_HIT", {
+  console.log("ALICE_WEBHOOK_HIT", {
     method: req.method,
     url: req.url,
     hasBody: Boolean(req.body),
@@ -250,10 +260,11 @@ export default async function handler(req, res) {
       ? Object.keys(req.body)
       : []
   });
+
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      service: "alice-openai-serper",
+      service: "alice-mistral-serper",
       message: "Webhook is ready. Yandex Dialogs should send POST requests to /api."
     });
   }
@@ -304,13 +315,13 @@ export default async function handler(req, res) {
       );
     }
 
-    const answer = await askOpenAI(
+    const answer = await askMistral(
       text,
       oldHistory,
       searchContext,
       Math.max(
         0,
-        Math.min(OPENAI_TIMEOUT_MS, remainingMs() - 600)
+        Math.min(MISTRAL_TIMEOUT_MS, remainingMs() - 600)
       )
     );
 
