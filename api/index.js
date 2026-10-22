@@ -1,11 +1,14 @@
 
-const DEFAULT_MODEL = "gpt-4.1-mini";
+const DEFAULT_MODEL = "gpt-6.1-sol";
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_MESSAGE_CHARS = 1200;
 const MAX_ALICE_TEXT = 1024;
 const TOTAL_RESPONSE_BUDGET_MS = 3600;
 const SERPER_TIMEOUT_MS = 600;
 const OPENAI_TIMEOUT_MS = 2500;
+
+const API_BASE_URL = "https://api.tokenn.pro/v1";
+const API_TIMEOUT_MS = 2500;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
@@ -48,7 +51,9 @@ function fitAliceText(value) {
   }
 
   const lastSpace = candidate.lastIndexOf(" ");
-  return (lastSpace > 200 ? candidate.slice(0, lastSpace) : candidate).trim() + "…";
+  return (
+    lastSpace > 200 ? candidate.slice(0, lastSpace) : candidate
+  ).trim() + "…";
 }
 
 function isSearchIntent(text) {
@@ -181,7 +186,7 @@ async function askOpenAI(text, history, searchContext, timeoutMs) {
   });
 
   const { response, data } = await fetchJson(
-    "https://api.openai.com/v1/chat/completions",
+    `${API_BASE_URL}/chat/completions`,
     {
       method: "POST",
       headers: {
@@ -195,18 +200,17 @@ async function askOpenAI(text, history, searchContext, timeoutMs) {
         max_tokens: 240
       })
     },
-    Math.min(OPENAI_TIMEOUT_MS, timeoutMs)
+    Math.min(API_TIMEOUT_MS, timeoutMs)
   );
 
   if (!response.ok) {
-    const status = Number(response.status);
-    console.error("OpenAI request failed with HTTP", status);
+    console.error("API provider request failed with HTTP", response.status);
 
-    if (status === 401 || status === 403) {
+    if (response.status === 401 || response.status === 403) {
       throw new Error("OPENAI_KEY_REJECTED");
     }
 
-    if (status === 429) {
+    if (response.status === 429) {
       throw new Error("OPENAI_QUOTA");
     }
 
@@ -216,6 +220,7 @@ async function askOpenAI(text, history, searchContext, timeoutMs) {
   const answer = data?.choices?.[0]?.message?.content?.trim();
 
   if (!answer) {
+    console.error("API provider returned an empty or unexpected response.");
     throw new Error("OPENAI_EMPTY_RESPONSE");
   }
 
@@ -228,17 +233,20 @@ function errorForUser(error) {
       return "Сервер пока не настроен. Проверьте переменную OPENAI_API_KEY в настройках Vercel.";
 
     case "OPENAI_KEY_REJECTED":
-      return "Не удалось подключиться к OpenAI. Проверьте API-ключ в настройках Vercel.";
+      return "Провайдер отклонил API-ключ. Проверьте ключ и доступ к сервису.";
 
     case "OPENAI_QUOTA":
-      return "Сейчас недоступна квота OpenAI API. Проверьте баланс и лимиты API-аккаунта.";
+      return "У API-провайдера достигнут лимит запросов или квоты. Проверьте баланс аккаунта.";
 
     case "TIME_BUDGET_EXHAUSTED":
     case "AbortError":
       return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз, чуть короче.";
 
+    case "OPENAI_EMPTY_RESPONSE":
+      return "API-провайдер не вернул текст ответа. Проверьте поддержку выбранной модели.";
+
     default:
-      return "Не получилось получить ответ от нейросети. Попробуйте ещё раз чуть позже.";
+      return "Не получилось получить ответ от API-провайдера. Попробуйте ещё раз чуть позже.";
   }
 }
 
@@ -255,7 +263,7 @@ export default async function handler(req, res) {
   if (req.method === "GET") {
     return res.status(200).json({
       ok: true,
-      service: "alice-openai-serper",
+      service: "alice-token-provider-serper",
       message: "Webhook is ready. Yandex Dialogs should send POST requests to /api."
     });
   }
