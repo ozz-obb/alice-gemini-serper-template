@@ -8,7 +8,7 @@ const SERPER_TIMEOUT_MS = 600;
 const OPENAI_TIMEOUT_MS = 2500;
 
 const API_BASE_URL = "https://api.tokenn.pro/v1";
-const API_TIMEOUT_MS = 2500;
+const API_TIMEOUT_MS = 4500;
 
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
