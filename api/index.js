@@ -1,11 +1,12 @@
 
 const DEFAULT_MODEL = "gpt-6.1-sol";
-const MAX_HISTORY_MESSAGES = 8;
-const MAX_HISTORY_MESSAGE_CHARS = 1200;
+const MAX_HISTORY_MESSAGES = 4;
+const MAX_HISTORY_MESSAGE_CHARS = 700;
 const MAX_ALICE_TEXT = 1024;
-const TOTAL_RESPONSE_BUDGET_MS = 5000;
+
+const TOTAL_RESPONSE_BUDGET_MS = 6500;
 const SERPER_TIMEOUT_MS = 600;
-const OPENAI_TIMEOUT_MS = 3000;
+const OPENAI_TIMEOUT_MS = 4000;
 
 const API_BASE_URL = "https://api.tokenn.pro/v1";
 const API_TIMEOUT_MS = 4500;
@@ -13,9 +14,10 @@ const API_TIMEOUT_MS = 4500;
 const SYSTEM_PROMPT = [
   "Ты — полезный голосовой помощник в навыке Яндекс Алисы.",
   "Отвечай естественно, по-русски, кратко и так, чтобы ответ было удобно слушать.",
-  "Обычно используй 1–3 коротких предложения. Не используй Markdown, таблицы, списки с символами или длинные вступления.",
-  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них; не выдумывай отсутствующие факты.",
-  "Если не знаешь ответа, честно скажи об этом."
+  "Обычно используй 1–3 коротких предложения.",
+  "Не используй Markdown, таблицы, списки с символами или длинные вступления.",
+  "Если вопрос требует актуальных данных и переданы результаты поиска, опирайся на них.",
+  "Не выдумывай отсутствующие факты. Если не знаешь ответа, честно скажи об этом."
 ].join(" ");
 
 function aliceResponse(text, endSession = false, history = []) {
@@ -78,9 +80,12 @@ function safeHistory(history) {
 
 async function fetchJson(url, options, timeoutMs) {
   const controller = new AbortController();
+  const startedAt = Date.now();
+  const effectiveTimeout = Math.max(100, timeoutMs);
+
   const timer = setTimeout(
     () => controller.abort(),
-    Math.max(100, timeoutMs)
+    effectiveTimeout
   );
 
   try {
@@ -90,7 +95,20 @@ async function fetchJson(url, options, timeoutMs) {
     });
 
     const data = await response.json().catch(() => ({}));
-    return { response, data };
+
+    return {
+      response,
+      data,
+      elapsedMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error("REQUEST_TIMEOUT");
+      timeoutError.cause = error;
+      throw timeoutError;
+    }
+
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -100,8 +118,10 @@ async function searchWeb(query, timeoutMs) {
   const key = process.env.SERPER_API_KEY;
   if (!key || timeoutMs < 150) return "";
 
+  const startedAt = Date.now();
+
   try {
-    const { response, data } = await fetchJson(
+    const { response, data, elapsedMs } = await fetchJson(
       "https://google.serper.dev/search",
       {
         method: "POST",
@@ -119,12 +139,19 @@ async function searchWeb(query, timeoutMs) {
       Math.min(SERPER_TIMEOUT_MS, timeoutMs)
     );
 
+    console.log("SERPER_RESULT", {
+      status: response.status,
+      elapsedMs
+    });
+
     if (!response.ok) {
       console.warn("Serper request failed with HTTP", response.status);
       return "";
     }
 
-    const items = (Array.isArray(data.organic) ? data.organic : [])
+    const items = (
+      Array.isArray(data.organic) ? data.organic : []
+    )
       .slice(0, 3)
       .map((item, i) => {
         const title = String(item.title || "").slice(0, 180);
@@ -133,7 +160,8 @@ async function searchWeb(query, timeoutMs) {
         return `${i + 1}. ${title}: ${snippet} ${link}`.trim();
       });
 
-    const answerBox = data.answerBox?.answer || data.answerBox?.snippet;
+    const answerBox = data.answerBox?.answer ||
+      data.answerBox?.snippet;
 
     if (answerBox) {
       items.unshift(
@@ -143,7 +171,10 @@ async function searchWeb(query, timeoutMs) {
 
     return items.length ? items.join("\n") : "";
   } catch (error) {
-    console.warn("Serper request failed or timed out.");
+    console.warn("SERPER_ERROR", {
+      message: error?.message || "unknown error",
+      elapsedMs: Date.now() - startedAt
+    });
     return "";
   }
 }
@@ -185,26 +216,57 @@ async function askOpenAI(text, history, searchContext, timeoutMs) {
     content: prompt
   });
 
-  const { response, data } = await fetchJson(
-    `${API_BASE_URL}/chat/completions`,
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json"
+  const startedAt = Date.now();
+  const requestTimeout = Math.min(API_TIMEOUT_MS, timeoutMs);
+
+  console.log("MODEL_REQUEST_STARTED", {
+    model,
+    timeoutMs: requestTimeout,
+    hasSearchContext: Boolean(searchContext),
+    historyMessages: messages.length - 2
+  });
+
+  let result;
+
+  try {
+    result = await fetchJson(
+      `${API_BASE_URL}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${key}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 0.5,
+          max_tokens: 160
+        })
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.5,
-        max_tokens: 240
-      })
-    },
-    Math.min(API_TIMEOUT_MS, timeoutMs)
-  );
+      requestTimeout
+    );
+  } catch (error) {
+    console.error("MODEL_REQUEST_ERROR", {
+      message: error?.message || "unknown error",
+      elapsedMs: Date.now() - startedAt,
+      timeoutMs: requestTimeout
+    });
+    throw error;
+  }
+
+  const { response, data, elapsedMs } = result;
+
+  console.log("MODEL_RESPONSE_RECEIVED", {
+    status: response.status,
+    elapsedMs
+  });
 
   if (!response.ok) {
-    console.error("API provider request failed with HTTP", response.status);
+    console.error(
+      "API provider request failed with HTTP",
+      response.status
+    );
 
     if (response.status === 401 || response.status === 403) {
       throw new Error("OPENAI_KEY_REJECTED");
@@ -239,8 +301,9 @@ function errorForUser(error) {
       return "У API-провайдера достигнут лимит запросов или квоты. Проверьте баланс аккаунта.";
 
     case "TIME_BUDGET_EXHAUSTED":
+    case "REQUEST_TIMEOUT":
     case "AbortError":
-      return "Не успела подготовить ответ. Попробуйте задать вопрос ещё раз, чуть короче.";
+      return "Ответ не успел прийти вовремя. Попробуйте ещё раз чуть позже.";
 
     case "OPENAI_EMPTY_RESPONSE":
       return "API-провайдер не вернул текст ответа. Проверьте поддержку выбранной модели.";
@@ -253,11 +316,7 @@ function errorForUser(error) {
 export default async function handler(req, res) {
   console.log("ALICE_WEBHOOK_HIT", {
     method: req.method,
-    url: req.url,
-    hasBody: Boolean(req.body),
-    bodyKeys: req.body && typeof req.body === "object"
-      ? Object.keys(req.body)
-      : []
+    hasBody: Boolean(req.body)
   });
 
   if (req.method === "GET") {
@@ -305,23 +364,26 @@ export default async function handler(req, res) {
     let searchContext = "";
 
     if (isSearchIntent(text) && process.env.SERPER_API_KEY) {
-      searchContext = await searchWeb(
-        text,
-        Math.min(
-          SERPER_TIMEOUT_MS,
-          Math.max(0, remainingMs() - 2600)
-        )
+      const searchBudget = Math.min(
+        SERPER_TIMEOUT_MS,
+        Math.max(0, remainingMs() - OPENAI_TIMEOUT_MS - 500)
       );
+
+      if (searchBudget >= 150) {
+        searchContext = await searchWeb(text, searchBudget);
+      }
     }
+
+    const modelBudget = Math.min(
+      OPENAI_TIMEOUT_MS,
+      remainingMs() - 500
+    );
 
     const answer = await askOpenAI(
       text,
       oldHistory,
       searchContext,
-      Math.max(
-        0,
-        Math.min(OPENAI_TIMEOUT_MS, remainingMs() - 600)
-      )
+      modelBudget
     );
 
     const history = [
@@ -336,18 +398,27 @@ export default async function handler(req, res) {
       }
     ].slice(-MAX_HISTORY_MESSAGES);
 
+    console.log("ALICE_WEBHOOK_SUCCESS", {
+      elapsedMs: Date.now() - startedAt
+    });
+
     return res.status(200).json(
       aliceResponse(answer, false, history)
     );
   } catch (error) {
-    const safeError = error?.message === "AbortError"
-      ? new Error("TIME_BUDGET_EXHAUSTED")
+    const isAbort = error?.name === "AbortError" ||
+      error?.message === "AbortError" ||
+      /aborted|abort/i.test(error?.message || "");
+
+    const safeError = isAbort
+      ? new Error("REQUEST_TIMEOUT")
       : error;
 
-    console.warn(
-      "Alice webhook returned a fallback response:",
-      safeError?.message || "unknown error"
-    );
+    console.warn("ALICE_WEBHOOK_FAILURE", {
+      message: safeError?.message || "unknown error",
+      elapsedMs: Date.now() - startedAt,
+      remainingMs: remainingMs()
+    });
 
     return res.status(200).json(
       aliceResponse(errorForUser(safeError), false, oldHistory)
