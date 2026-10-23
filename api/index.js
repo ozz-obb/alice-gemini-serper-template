@@ -1,5 +1,5 @@
 
-const DEFAULT_MODEL = "gpt-6.1-sol";
+const DEFAULT_MODEL = "gpt-5.5";
 const MAX_HISTORY_MESSAGES = 4;
 const MAX_HISTORY_MESSAGE_CHARS = 700;
 const MAX_ALICE_TEXT = 1024;
